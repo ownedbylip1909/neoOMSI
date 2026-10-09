@@ -11,3 +11,4 @@ thiserror.workspace = true
 log.workspace = true
 flate2 = "1"
 unicode-normalization = "0.1"
+sha2 = "0.11"

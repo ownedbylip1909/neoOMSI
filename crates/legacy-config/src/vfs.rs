@@ -48,7 +48,97 @@ pub struct ZipArchive {
     dirs: HashMap<String, Vec<(String, bool)>>,
 }
 
-static MOUNTS: RwLock<Vec<Arc<ZipArchive>>> = RwLock::new(Vec::new());
+/// Common trait for all VFS archive backends (standard Zip archives and encrypted Protected containers).
+pub trait VfsArchive: Send + Sync {
+    /// The archive file or virtual name (= the mount point).
+    fn path(&self) -> &Path;
+    /// The folder inside the archive the mount starts at.
+    fn prefix(&self) -> &str;
+    /// Number of files in the archive.
+    fn file_count(&self) -> usize;
+    /// Unpacked size of all files below the mount root.
+    fn total_size(&self) -> u64;
+    /// Contents of the entry at `rel` (relative to the mount root).
+    fn read(&self, rel: &str) -> io::Result<Vec<u8>>;
+    /// Check if key is a file.
+    fn is_file(&self, key: &str) -> bool;
+    /// Check if key is a directory.
+    fn is_dir(&self, key: &str) -> bool;
+    /// Directory listing.
+    fn list_dir(&self, key: &str) -> Option<Vec<(OsString, bool)>>;
+    /// Returns true if this is an encrypted, in-memory protected container.
+    fn is_protected(&self) -> bool {
+        false
+    }
+    /// Returns the watermark if present.
+    fn watermark(&self) -> Option<&crate::protected::Watermark> {
+        None
+    }
+}
+
+impl VfsArchive for ZipArchive {
+    fn path(&self) -> &Path {
+        &self.path
+    }
+    fn prefix(&self) -> &str {
+        &self.prefix
+    }
+    fn file_count(&self) -> usize {
+        self.entries.len()
+    }
+    fn total_size(&self) -> u64 {
+        self.entries.values().map(|e| e.size).sum()
+    }
+    fn read(&self, rel: &str) -> io::Result<Vec<u8>> {
+        self.read(rel)
+    }
+    fn is_file(&self, key: &str) -> bool {
+        self.entries.contains_key(key)
+    }
+    fn is_dir(&self, key: &str) -> bool {
+        self.dirs.contains_key(key)
+    }
+    fn list_dir(&self, key: &str) -> Option<Vec<(OsString, bool)>> {
+        self.dirs
+            .get(key)
+            .map(|l| l.iter().map(|(n, d)| (OsString::from(n), *d)).collect())
+    }
+}
+
+impl VfsArchive for crate::protected::ProtectedArchive {
+    fn path(&self) -> &Path {
+        self.path()
+    }
+    fn prefix(&self) -> &str {
+        self.prefix()
+    }
+    fn file_count(&self) -> usize {
+        self.file_count()
+    }
+    fn total_size(&self) -> u64 {
+        self.total_size()
+    }
+    fn read(&self, rel: &str) -> io::Result<Vec<u8>> {
+        self.read(rel)
+    }
+    fn is_file(&self, key: &str) -> bool {
+        self.is_file(key)
+    }
+    fn is_dir(&self, key: &str) -> bool {
+        self.is_dir(key)
+    }
+    fn list_dir(&self, key: &str) -> Option<Vec<(OsString, bool)>> {
+        self.list_dir(key)
+    }
+    fn is_protected(&self) -> bool {
+        true
+    }
+    fn watermark(&self) -> Option<&crate::protected::Watermark> {
+        self.watermark()
+    }
+}
+
+static MOUNTS: RwLock<Vec<Arc<dyn VfsArchive>>> = RwLock::new(Vec::new());
 
 /// The largest entry that is read into memory (a corrupt size field must not allocate
 /// gigabytes).
@@ -462,8 +552,8 @@ impl ZipArchive {
 /// Mount the archive at `path` (as the folder `path`). Mounting the same archive twice is a
 /// no-op. Returns the mount point.
 pub fn mount_zip(path: &Path) -> io::Result<PathBuf> {
-    if let Some(m) = MOUNTS.read().unwrap().iter().find(|m| m.path == path) {
-        return Ok(m.path.clone());
+    if let Some(m) = MOUNTS.read().unwrap().iter().find(|m| m.path() == path) {
+        return Ok(m.path().to_path_buf());
     }
     let t0 = std::time::Instant::now();
     let archive = ZipArchive::open(path)?;
@@ -498,6 +588,47 @@ pub fn mount_zip(path: &Path) -> io::Result<PathBuf> {
     Ok(mount)
 }
 
+/// Mount a protected `.neoasset` encrypted container using a session decryption key.
+/// Decrypts assets in-memory on demand without writing plain files to disk.
+pub fn mount_protected(path: &Path, session_key: &[u8]) -> io::Result<PathBuf> {
+    if let Some(m) = MOUNTS.read().unwrap().iter().find(|m| m.path() == path) {
+        return Ok(m.path().to_path_buf());
+    }
+    let t0 = std::time::Instant::now();
+    let archive = crate::protected::ProtectedArchive::open(path, session_key)?;
+    log::info!(
+        "protected vfs {}: {} files ({:.1} GB unpacked) under '{}', mounted in {:.0} ms (watermark: {:?})",
+        path.display(),
+        archive.file_count(),
+        archive.total_size() as f64 / 1e9,
+        archive.prefix(),
+        t0.elapsed().as_secs_f64() * 1000.0,
+        archive.watermark().map(|w| &w.account_id)
+    );
+    let mount = archive.path().to_path_buf();
+    MOUNTS.write().unwrap().push(Arc::new(archive));
+    Ok(mount)
+}
+
+/// Mount a protected archive directly from in-memory encrypted bytes.
+pub fn mount_protected_bytes(name: &str, data: Arc<Vec<u8>>, session_key: &[u8]) -> io::Result<PathBuf> {
+    let path = PathBuf::from(name);
+    if let Some(m) = MOUNTS.read().unwrap().iter().find(|m| m.path() == path) {
+        return Ok(m.path().to_path_buf());
+    }
+    let archive = crate::protected::ProtectedArchive::from_bytes(name, data, session_key)?;
+    log::info!(
+        "in-memory protected vfs {}: {} files ({:.1} GB unpacked) mounted (watermark: {:?})",
+        name,
+        archive.file_count(),
+        archive.total_size() as f64 / 1e9,
+        archive.watermark().map(|w| &w.account_id)
+    );
+    let mount = archive.path().to_path_buf();
+    MOUNTS.write().unwrap().push(Arc::new(archive));
+    Ok(mount)
+}
+
 /// Mount a zip archive and make it a content root (searched after the roots added before).
 pub fn add_content_zip(path: &Path) -> io::Result<PathBuf> {
     let mount = mount_zip(path)?;
@@ -505,21 +636,38 @@ pub fn add_content_zip(path: &Path) -> io::Result<PathBuf> {
     Ok(mount)
 }
 
+/// Mount a protected archive and make it a content root (searched after the roots added before).
+pub fn add_content_protected(path: &Path, session_key: &[u8]) -> io::Result<PathBuf> {
+    let mount = mount_protected(path, session_key)?;
+    crate::add_content_root(mount.clone());
+    Ok(mount)
+}
+
+/// Unmount an archive by path, dropping in-memory keys and cached buffers.
+pub fn unmount(path: &Path) {
+    MOUNTS.write().unwrap().retain(|m| m.path() != path);
+}
+
+/// Unmount all protected archives and zeroize session keys.
+pub fn unmount_all_protected() {
+    MOUNTS.write().unwrap().retain(|m| !m.is_protected());
+}
+
 /// The mounted archives.
-pub fn mounts() -> Vec<Arc<ZipArchive>> {
+pub fn mounts() -> Vec<Arc<dyn VfsArchive>> {
     MOUNTS.read().unwrap().clone()
 }
 
 /// The archive `path` lies in, and its lower-case path inside the mount. Names are read as
 /// Windows reads them (a folder loses one trailing dot, the last name all trailing dots and
 /// spaces), since the archive can only hold names Windows could write.
-fn locate(path: &Path) -> Option<(Arc<ZipArchive>, String)> {
+fn locate(path: &Path) -> Option<(Arc<dyn VfsArchive>, String)> {
     let mounts = MOUNTS.read().unwrap();
     if mounts.is_empty() {
         return None;
     }
     for m in mounts.iter() {
-        if let Ok(rest) = path.strip_prefix(&m.path) {
+        if let Ok(rest) = path.strip_prefix(m.path()) {
             let mut parts: Vec<String> = Vec::new();
             let comps: Vec<Component> = rest.components().collect();
             for (i, c) in comps.iter().enumerate() {
@@ -550,7 +698,7 @@ fn locate(path: &Path) -> Option<(Arc<ZipArchive>, String)> {
 
 /// The archive file `path` lies in (the mount point), if it lies in a mounted one.
 pub fn archive_of(path: &Path) -> Option<PathBuf> {
-    locate(path).map(|(m, _)| m.path.clone())
+    locate(path).map(|(m, _)| m.path().to_path_buf())
 }
 
 /// Read a whole file, from a folder or from a mounted archive.
@@ -590,10 +738,7 @@ pub fn is_dir(path: &Path) -> bool {
 /// Names in a folder with a flag for sub-folders; `None` when it is not a folder.
 pub fn list_dir(path: &Path) -> Option<Vec<(OsString, bool)>> {
     match locate(path) {
-        Some((m, key)) => m
-            .dirs
-            .get(&key)
-            .map(|l| l.iter().map(|(n, d)| (OsString::from(n), *d)).collect()),
+        Some((m, key)) => m.list_dir(&key),
         None => {
             let rd = std::fs::read_dir(path).ok()?;
             // the entry's own type costs nothing; only a symbolic link needs a stat

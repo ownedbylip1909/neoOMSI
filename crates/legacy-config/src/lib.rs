@@ -27,10 +27,14 @@ pub mod codepage;
 pub mod install_search;
 mod keywords;
 pub mod number;
+pub mod protected;
 pub mod vfs;
 pub use install_search::find_original_install;
 pub use number::{parse_f32, parse_f64, parse_i32, parse_i64};
-pub use vfs::{add_content_zip, mount_zip};
+pub use vfs::{
+    add_content_protected, add_content_zip, mount_protected, mount_protected_bytes, mount_zip,
+    unmount, unmount_all_protected, VfsArchive,
+};
 
 /// Decode raw file bytes with OMSI's encoding rules.
 pub fn decode_text(bytes: &[u8]) -> String {

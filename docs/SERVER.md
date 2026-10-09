@@ -37,3 +37,16 @@ scripts/build-server.sh
 ```
 
 This compiles `neoomsi` with headless flags, generates `start.sh`, and outputs the complete server bundle to `dist/server/`.
+
+## Protected Mod Assets & In-Memory VFS (DRM)
+
+neoOMSI provides built-in mod protection for paid, private, or server-exclusive content:
+
+1. **Encrypted `.neoasset` Containers:** Mod files (textures, sounds, 3D meshes, configs) are packaged into authenticated encrypted archives (`.neoasset`).
+2. **In-Memory Virtual File System (VFS):** When an authorized player joins the server, the server transmits an ephemeral session key. The client mounts the archive directly in memory:
+   - File assets are decrypted on demand straight into RAM/VRAM buffers.
+   - Decrypted plain files are **never written to disk** (preventing extraction from `%TEMP%` or cache folders).
+   - Upon session termination or disconnect, session keys and memory buffers are immediately zeroed (`ZeroizeOnDrop`) and unmounted.
+3. **Server-Authoritative Execution:** Core vehicle and gameplay scripts run on the server and are replicated via network states, ensuring dumped assets remain non-functional offline.
+4. **Forensic Digital Watermarking:** Containers support embedding cryptographically signed watermarks bound to player Steam/Account IDs for leak detection and attribution.
+

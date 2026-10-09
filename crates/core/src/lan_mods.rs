@@ -707,6 +707,7 @@ static SANDBOX: Mutex<Option<PathBuf>> = Mutex::new(None);
 /// Remove the session folders of games that are no longer running (one that ended without
 /// cleaning up).
 pub fn remove_stale() {
+    ::legacy_config::unmount_all_protected();
     let Some(base) = sandbox_base() else { return };
     let Ok(rd) = std::fs::read_dir(&base) else {
         return;
@@ -741,6 +742,7 @@ fn process_alive(pid: u32) -> bool {
 
 /// The session is over: its content goes.
 pub fn clean_up() {
+    ::legacy_config::unmount_all_protected();
     let taken = SANDBOX.lock().unwrap_or_else(|e| e.into_inner()).take();
     if let Some(dir) = taken {
         ::legacy_config::remove_content_root(&dir);
