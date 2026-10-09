@@ -59,6 +59,7 @@ mod bus_service;
 mod camera_tool;
 mod camera_util;
 mod cli;
+mod control;
 mod controllers;
 #[cfg(windows)]
 mod dinput;
@@ -66,6 +67,7 @@ mod duty_start;
 mod editor_ctl;
 #[cfg(all(target_os = "linux", target_pointer_width = "64"))]
 mod evdev_ff;
+mod game_link;
 mod game_menu;
 mod lab_menu;
 mod lab_options;
@@ -74,10 +76,10 @@ mod input_keys;
 mod input_mouse;
 mod input_script;
 mod lan_mods;
-mod launcher_link;
 mod memory;
 mod offscreen;
 mod on_foot;
+mod pax_pack;
 mod player;
 mod plugins;
 mod route_arrows;
@@ -109,7 +111,6 @@ use cli::*;
 use duty_start::*;
 use glam::{DVec3, Vec3};
 use input_script::*;
-use launcher_link::*;
 use memory::*;
 use offscreen::*;
 use ::render::{Camera, Renderer, Scene, SurfaceState};
@@ -134,11 +135,17 @@ use world_load::*;
 pub fn run() -> Result<()> {
     #[cfg(target_os = "macos")]
     restart_with_allocator_settings();
+    let protocol = std::env::args().any(|a| a == "--control-protocol");
+    // a console would take over the launcher's pipes
     #[cfg(windows)]
-    attach_parent_console();
+    if !protocol {
+        attach_parent_console();
+    }
     let args = Args::parse();
     let bare = std::env::args().len() == 1;
-    logging::init(if args.launcher || (bare && !args.menu) {
+    logging::init(if protocol {
+        "control"
+    } else if args.launcher || (bare && !args.menu) {
         "launcher"
     } else {
         "game"
@@ -156,10 +163,17 @@ pub fn run() -> Result<()> {
                 std::backtrace::Backtrace::force_capture()
             ),
         );
+        // (other threads' panics are often caught: a damaged tile, a plugin)
+        if std::thread::current().name() == Some("main") {
+            game_link::failed(&format!("the game stopped on an error: {info}"));
+        }
         default_hook(info);
     }));
     if let Err(e) = config::init(config::default_path()) {
         log::warn!("settings not loaded: {e}");
+    }
+    if protocol {
+        return control::run();
     }
     log::info!(
         "neoOMSI {VERSION}, build {BUILD}{}",
@@ -173,11 +187,19 @@ pub fn run() -> Result<()> {
         return Ok(());
     };
     if args.launcher || (bare && !args.menu) {
-        if legacy_config::env::var_os("OMSI_LAUNCHER").is_some() && open_launcher()? {
-            return Ok(());
+        // `--launcher` always means the built-in one
+        if !args.launcher {
+            match omsi_launcher_lib::start_external_launcher(&std::env::current_exe()?) {
+                Ok(true) => return Ok(()),
+                Ok(false) => {}
+                Err(e) => log::warn!("{e:#}: the built-in launcher opens instead"),
+            }
         }
         launcher_statics();
         return launcher::run(graphics_instance());
+    }
+    if server_cfg.is_none() {
+        game_link::connect();
     }
     let Some(app) = make_app(args, server_cfg)? else {
         return Ok(());

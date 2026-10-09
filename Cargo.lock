@@ -688,6 +688,7 @@ dependencies = [
  "image",
  "imgui",
  "jni",
+ "launcher-protocol",
  "legacy-config",
  "legacy-launcher-core",
  "legacy-o3d",
@@ -1905,6 +1906,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "launcher-protocol"
+version = "0.2.0"
+dependencies = [
+ "getrandom 0.4.3",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "lazy_static"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1928,6 +1938,7 @@ dependencies = [
  "anyhow",
  "config",
  "content",
+ "launcher-protocol",
  "legacy-config",
  "legacy-vehicle",
  "libc",

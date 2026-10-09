@@ -22,6 +22,7 @@ members = [
     "crates/legacy-plugin/demo",
     "crates/i18n",
     "crates/user-interface",
+    "crates/launcher-protocol",
     "crates/legacy-launcher-core",
     "crates/core",
     "tools/omsi-check",
